@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.xlsx
+*.csv
+odoo-19.0/
+*.log
+.DS_Store
