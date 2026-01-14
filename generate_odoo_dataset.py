@@ -175,7 +175,8 @@ def main():
 
     print(f"Scanning {addons_path}...")
     
-    data = []
+    # 1. Collect all potential tasks (functions to process)
+    tasks = []
     
     # Walk through directories
     modules = [d for d in os.listdir(addons_path) if os.path.isdir(os.path.join(addons_path, d))]
@@ -191,83 +192,150 @@ def main():
                 if file.endswith(".py"):
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, module_path)
-                    process_file(full_path, module, rel_path, data, ollama_model)
+                    process_file(full_path, module, rel_path, tasks, ollama_model)
     
-    print(f"Collected {len(data)} records.")
+    total_tasks = len(tasks)
+    print(f"Total functions found: {total_tasks}")
 
-    if ollama_model:
-        print(f"Generating AI descriptions using {ollama_model}...")
+    # 2. Checkpointing Logic
+    # We use a CSV file to store progress. Excel is unsafe for appending.
+    checkpoint_file = output_file + ".checkpoint.csv"
+    processed_count = 0
+    processed_keys = set()
+    
+    # Load existing progress
+    if os.path.exists(checkpoint_file):
+        try:
+            # Check if file has header
+            with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                first_line = f.readline()
+                if not first_line.startswith("Module"):
+                    print("Checkpoint file seems corrupted or empty. Starting over.")
+                else:
+                    existing_df = pd.read_csv(checkpoint_file)
+                    # Create unique keys to identify processed functions: Module+File+Function
+                    # We use a tuple of these as a key
+                    for _, row in existing_df.iterrows():
+                        key = (str(row['Module Name']), str(row['File Name']), str(row['Function name']))
+                        processed_keys.add(key)
+                    processed_count = len(processed_keys)
+                    print(f"Resuming from checkpoint... {processed_count} functions already completed.")
+        except Exception as e:
+            print(f"Error reading checkpoint: {e}. Starting over.")
+
+    # 3. Process remaining tasks
+    
+    # Open CSV for appending
+    # If file doesn't exist or is empty, write header
+    write_header = not os.path.exists(checkpoint_file) or os.stat(checkpoint_file).st_size == 0
+    
+    limit = args.limit
+    
+    print(f"Starting processing with model: {ollama_model if ollama_model else 'None (Docstrings only)'}")
+    
+    # Use tqdm max interval to make sure we see updates
+    pbar = tqdm(total=total_tasks, initial=processed_count, desc="Processing")
+    
+    with open(checkpoint_file, 'a', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ["Module Name", "File Directory", "File Name", "model name", "Class name", "Function name", "Description"]
+        writer = pd.DataFrame(columns=fieldnames).to_csv(index=False).strip() # specific hack to get CSV format right if needed, but standard csv lib is better
+        import csv
+        csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
-        count = 0
-        limit = args.limit
+        if write_header:
+            csv_writer.writeheader()
+
+        current_session_count = 0
         
-        # Use tqdm for progress bar
-        for record in tqdm(data, desc="AI Processing"):
-            if limit > 0 and count >= limit:
+        for record in tasks:
+            # Check limit
+            if limit > 0 and (processed_count + current_session_count) >= limit:
+                print(f"\nLimit of {limit} reached.")
                 break
-                
-            source_code = record.get("Source Code")
-            # Skip if source code missing or description already exists (optional: override existing)
-            # Strategy: if docstring exists, use it + AI. If no docstring, AI is crucial.
-            # User request: "description has to be more descriptive". So we always generate.
+
+            # Deduplication Key
+            key = (str(record['Module Name']), str(record['File Name']), str(record['Function name']))
             
-            if source_code:
+            if key in processed_keys:
+                # Already done
+                pbar.update(1)
+                continue
+            
+            # Needs processing
+            source_code = record.get("Source Code")
+            
+            # AI Generation
+            if ollama_model and source_code:
                 new_desc = generate_description_ollama(source_code, ollama_model)
                 if new_desc and not new_desc.startswith("[AI Generation Failed"):
-                   record["Description"] = new_desc
-                elif record["Description"]:
-                   # Fallback to existing docstring if AI fails
-                   pass
+                   record["Description"] = new_desc.replace('\n', ' ').replace('\r', '') # Flatten for safety
             
-            count += 1
+            # Clean Record for Saving (Remove Source Code)
+            save_record = record.copy()
+            if "Source Code" in save_record:
+                del save_record["Source Code"]
+            
+            # Sanitize text for CSV/Excel safety
+            if save_record["Description"]:
+                 save_record["Description"] = str(save_record["Description"]).encode('utf-8', 'ignore').decode('utf-8')
 
-    # Remove Source Code column before saving
-    for record in data:
-        if "Source Code" in record:
-            del record["Source Code"]
+            # Write to disk IMMEDIATELY
+            csv_writer.writerow(save_record)
+            csvfile.flush() # Ensure it hits the disk
+            
+            current_session_count += 1
+            pbar.update(1)
+            
+    pbar.close()
 
-    print("Creating DataFrame...")
-    df = pd.DataFrame(data)
+    # 4. Finalize: Convert Checkpoint CSV to formatted Excel (Grouped Sheets)
+    print("\nProcessing complete. Generating final Excel file from checkpoint...")
     
-    # Remove illegal characters from string columns
-    def clean_text(text):
-        if isinstance(text, str):
-            return "".join(c for c in text if (0x20 <= ord(c) <= 0xD7FF) or c in ('\t', '\n', '\r') or (0xE000 <= ord(c) <= 0xFFFD) or (0x10000 <= ord(c) <= 0x10FFFF))
-        return text
+    if os.path.exists(checkpoint_file):
+        try:
+            df = pd.read_csv(checkpoint_file)
+            
+            # Cleaning function
+            def clean_text(text):
+                if isinstance(text, str):
+                    return "".join(c for c in text if (0x20 <= ord(c) <= 0xD7FF) or c in ('\t', '\n', '\r') or (0xE000 <= ord(c) <= 0xFFFD) or (0x10000 <= ord(c) <= 0x10FFFF))
+                return text
 
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].apply(clean_text)
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].apply(clean_text)
 
-    # Write to Excel with separate sheets
-    print("Writing to Excel file (this may take a while)...")
-    try:
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            if df.empty:
-                df.to_excel(writer, sheet_name="Sheet1", index=False)
-            else:
-                groups = df.groupby("Module Name")
-                existing_sheet_names = set()
-                
-                for module_name, group_df in groups:
-                    clean_name = str(module_name)
-                    clean_name = "".join(c for c in clean_name if c not in ":\\/?*[]")
-                    sheet_name = clean_name[:31]
+            print("Writing to Excel file (this may take a while)...")
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                if df.empty:
+                     df.to_excel(writer, sheet_name="Sheet1", index=False)
+                else:
+                    groups = df.groupby("Module Name")
+                    existing_sheet_names = set()
                     
-                    if sheet_name in existing_sheet_names:
-                        base_name = sheet_name
-                        counter = 1
-                        while sheet_name in existing_sheet_names:
-                            suffix = str(counter)
-                            sheet_name = base_name[:31-len(suffix)] + suffix
-                            counter += 1
-                    
-                    existing_sheet_names.add(sheet_name)
-                    group_df.to_excel(writer, sheet_name=sheet_name, index=False)
-    except Exception as e:
-        print(f"Error writing Excel file: {e}")
-        sys.exit(1)
-
-    print(f"Dataset finished: {output_file}")
+                    for module_name, group_df in groups:
+                        clean_name = str(module_name)
+                        clean_name = "".join(c for c in clean_name if c not in ":\\/?*[]")
+                        sheet_name = clean_name[:31]
+                        
+                        if sheet_name in existing_sheet_names:
+                            base_name = sheet_name
+                            counter = 1
+                            while sheet_name in existing_sheet_names:
+                                suffix = str(counter)
+                                sheet_name = base_name[:31-len(suffix)] + suffix
+                                counter += 1
+                        
+                        existing_sheet_names.add(sheet_name)
+                        group_df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            print(f"SUCCESS: Dataset saved to {output_file}")
+            print(f"You can delete the checkpoint file '{checkpoint_file}' if everything looks good.")
+            
+        except Exception as e:
+            print(f"Error creating final Excel: {e}")
+            print(f"Your data is SAFE in the checkpoint file: {checkpoint_file}")
+    else:
+        print("No checkpoint file found to generate Excel from.")
 
 if __name__ == "__main__":
     main()
