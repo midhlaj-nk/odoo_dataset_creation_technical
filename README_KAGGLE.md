@@ -14,7 +14,8 @@ This guide helps you run the 24-hour job in the background using Kaggle's free G
 3. **Settings (Important)**:
    - Expand the "Settings" menu on the right.
    - **Internet**: Switch to **On** (Requires phone verification if new account).
-   - **Accelerator**: Select **GPU T4 x2**.
+   - **Accelerator**: Select **GPU T4 x2** (or GPU P100).
+   - ⚠️ **IMPORTANT**: Do **NOT** select "TPU". Ollama does not run on TPUs. If you select TPU, the script will fail.
 
 ## Step 3: Setup the Notebook
 1. In the first cell of the Kaggle Notebook, clone your GitHub repo:
