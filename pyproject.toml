@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "odoo-dataset-generator"
+version = "1.0.0"
+description = "A tool to generate Odoo datasets from source code with AI-generated descriptions."
+readme = "README_KAGGLE.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pandas",
+    "openpyxl",
+    "requests",
+    "tqdm",
+    "openai",
+    "python-dotenv",
+    "tenacity",
+]
+
+[project.scripts]
+odoo-gen = "generate_odoo_dataset:main"

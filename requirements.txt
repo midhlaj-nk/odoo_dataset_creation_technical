@@ -3,3 +3,5 @@ openpyxl
 requests
 tqdm
 openai
+python-dotenv
+tenacity
